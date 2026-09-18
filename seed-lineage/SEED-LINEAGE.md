@@ -103,7 +103,7 @@ you get a green job and no lineage.
 
 Use this if the content API is unavailable on your tenant. It ingests the same
 `links.csv`, packaged as `GenericLinks.zip`, via a Custom Metadata Integration
-catalog source scanned by a Secure Agent. Steps 4–7 of Informatica's
+catalog source. Steps 4–7 of Informatica's
 *Custom Metadata Integration Reference* plus KB 000192802.
 
 **Phase A is UI-only.** Re-probed against this tenant: every REST path for creating
@@ -127,12 +127,16 @@ catalog source you create, edit, schedule or run.
    from step 1, **Create**.
 4. **Registration** page: name it, then under **Connection Information** set
    **Metadata Source Type = CSV Files**, **Source Type = Upload**, and attach
-   `GenericLinks.zip` under **File Details**. Select the Secure Agent
-   **Runtime Environment**.
-5. **Next** → **Configuration**: **Metadata Extraction** is on by default and is all
+   `GenericLinks.zip` under **File Details**.
+5. **Runtime Environment:** `MultiTenantServerless` works and is the simplest
+   choice — **no Secure Agent is required** for an Upload-based custom lineage
+   source. (Verified on this tenant: a working `Custom Lineage` source runs with
+   `Runtime Environment = MultiTenantServerless`.) Earlier notes in this project
+   claimed lineage seeding was blocked on a Secure Agent; it never was.
+6. **Next** → **Configuration**: **Metadata Extraction** is on by default and is all
    a links-only job needs. **Next** through **Associations** and **Schedule**, then
    **Save**.
-6. Note the catalog source UUID from the browser address bar, then **Run** (or
+7. Note the catalog source UUID from the browser address bar, then **Run** (or
    Actions → Run on the Explore page). Watch it under **Job Monitoring**.
 
 Re-running afterwards is scriptable:
