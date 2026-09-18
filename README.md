@@ -120,10 +120,19 @@ The agent calls the product mock through the gateway and prints the
 Out of the box CDGC has provenance for the demo asset but **no lineage edges**. To
 light up `x-dp-lineage-downstream`, author real lineage with the one-off seeding
 kit in **[`seed-lineage/`](seed-lineage/SEED-LINEAGE.md)** — a `links.csv`
-(`dim_product.csv → fact_order_line.csv`, plus sku/price column flows) packaged as
-`GenericLinks.zip` and ingested via a CDGC **Custom Lineage** catalog source on a
-Secure Agent. The policy detects lineage by a denylist of structural relationship
-types, so it stamps the new edges with **no rebuild**.
+(`dim_product.csv → fact_order_line.csv`, plus sku/price column flows) applied
+straight to CDGC through the content service's `relationship` segment:
+
+```bash
+cd seed-lineage
+python apply_lineage.py --dry-run && python apply_lineage.py
+python seed_lineage.py --verify
+```
+
+No Secure Agent, no Metadata Command Center step, no scan — and it's idempotent.
+The policy detects lineage by a denylist of structural relationship types, so it
+stamps the new edges with **no rebuild**. A Custom Lineage catalog source
+(`GenericLinks.zip`) route is documented as a fallback.
 
 ---
 

@@ -1,4 +1,4 @@
-# Seeding real lineage into CDGC (Custom Lineage)
+# Seeding real lineage into CDGC
 
 This kit authors the lineage edges the Provenance Stamping policy needs before it
 can stamp `x-dp-lineage-*` headers:
@@ -13,45 +13,69 @@ dim_product.csv  ──(dataset flow)──▶  fact_order_line.csv
 Order Transaction scan) consumes its sku / price. That is a genuine, defensible
 dataflow to model.
 
-## Why a catalog source and not an API call
+**There is a direct lineage API.** Earlier versions of this kit claimed CDGC had
+no inline "create lineage" endpoint and that lineage could only be ingested by a
+Custom Metadata Integration catalog source scanned from a `GenericLinks.zip`. That
+is wrong: the content service's **`relationship` segment** authors edges directly.
+`apply_lineage.py` uses it, needs no Secure Agent, no MCC UI step and no scan, and
+is idempotent. The catalog-source route is kept below as a fallback.
 
-CDGC has **no supported inline "create lineage" API.** Re-probed live against the
-tenant on 2026-09-18: every plausible REST path on
-`ccgf-catalog-source-management/api/v1` returns 404 — `/datasourcetypes`,
-`/customtypes`, `/customCatalogSourceTypes`, `/models`, `/seeds`, `/connectors`,
-`/datasources/{id}/files`, `/datasources/{id}/jobs` — and no OpenAPI document is
-served. Only `/datasources` (list, GET, multipart POST) and
-`/datasource/{id}/operations/sync` exist.
+---
 
-So **Phase A below is genuinely UI-only**, and the `GenericLinks.zip` upload is
-part of it. Phase B (re-running the scan) *is* scriptable, and is what
-`seed_lineage.py --sync` does.
+## Primary route — `apply_lineage.py`
 
-> **Tested and rejected:** the catalog source's *"Provide a Local Path"* option
-> would let the Secure Agent read the zip off its own filesystem, which would make
-> the whole flow scriptable. On this tenant it does not work — a probe file staged
-> on the demo SFTP share (`/upload/data-products/...`) never appeared to a catalog
-> source scanning the corresponding agent path (`/data/csv/...`) within 8 minutes,
-> so that share is **not** the agent's mount. Use **Upload**.
+```bash
+export IDMC_TOOLKIT=<dir containing the idmc/ package>
+source ../demo/env.local.sh          # CDGC creds (gitignored)
 
-## Artifacts in this directory
+python apply_lineage.py --dry-run    # resolve reference ids, print the plan
+python apply_lineage.py              # author the edges
+python seed_lineage.py --verify      # confirm real lineage now exists
+```
 
-| file | what |
-|---|---|
-| `links.csv.example` | the 3 lineage edges, in CDGC's `Source,Target,Association` format, with placeholder reference ids |
-| `links.csv` | your real copy — **gitignored**, it embeds tenant asset ids |
-| `GenericLinks.zip` | generated from `links.csv`; the only name the scanner accepts |
-| `validate_links.py` | read-only pre-flight: resolves every reference id against CDGC |
-| `seed_lineage.py` | `--zip` / `--validate` / `--sync` / `--verify` |
+`links.csv` stays the source of truth, so the same file drives either route.
+
+### The API
+
+```
+PATCH {cdgc-api-host}/data360/content/v1/assets/{assetId}?scheme=internal
+[
+  { "operation": "add",
+    "segment": "relationship",
+    "items": [ { "fromIdentity": "<uuid>",
+                 "toIdentity":   "<uuid>",
+                 "association":  "core.DataSetDataFlow" } ] }
+]
+```
+
+Headers: `Authorization: Bearer <jwt>`, `X-INFA-ORG-ID`, `X-INFA-PRODUCT-ID: CDGC`,
+plus the login session cookie (`USER_SESSION` / `IDS_TOKEN`) — these writes are
+PEP-gated and the JWT alone is not enough.
+
+### Three things that will cost you an afternoon
+
+1. **The body is a bare JSON list**, not a single object. Sending the object form
+   documented in most examples fails with
+   `Cannot deserialize value of type ArrayList<UpdateAssetRequest>` — reported as
+   an HTTP **500**, which reads like a server fault rather than a bad request.
+2. **`fromIdentity` / `toIdentity` are the internal `core.identity` UUID**, not the
+   `core.externalId` reference id that `links.csv` carries. `apply_lineage.py`
+   resolves each row through `ccgf-searchv2` first.
+3. **409 `Relationship already exists` is success**, and is what makes re-runs
+   idempotent. The script reports those as `SAME`.
+
+`operation: "remove"` is exposed as `--remove` for symmetry; it has not been
+exercised against a live edge here.
 
 ### links.csv format
 
 Columns: **`Source,Target,Association`**.
 
-- `Source` / `Target` are each the asset's **Reference ID** — which is exactly its
-  CDGC `core.externalId`, of the form `<catalogSourceId>://<path>~<classType>`.
-  In Data Governance and Catalog it is the **Reference ID** field on an asset's
-  **System Attributes** tab.
+- `Source` / `Target` are each the asset's **Reference ID** — exactly its CDGC
+  `core.externalId`, of the form `<catalogSourceId>://<path>~<classType>`. In Data
+  Governance and Catalog it is the **Reference ID** field on an asset's
+  **System Attributes** tab. Copy it verbatim; a hand-built id silently matches
+  nothing.
 - `Association` is the relationship type, and is **case-sensitive**:
 
   | Association | Links |
@@ -62,149 +86,110 @@ Columns: **`Source,Target,Association`**.
   | `core.DataSetDataFlow` | **table → table (dataset lineage)** |
   | `core.DirectionalDataFlow` | **column → column (element lineage)** |
 
-This kit uses the last two. The shape of a row (placeholders for the two catalog
-source ids):
+Validate before applying — `validate_links.py` resolves every reference id and
+checks the association names:
 
-```
-<productCatalogSourceId>://FileServer/data/csv/dim_product.csv~com.infa.odin.models.file.flat.FlatFile,<orderTransactionSourceId>://FileServer/data/csv/order-transactions/fact_order_line.csv~com.infa.odin.models.file.flat.FlatFile,core.DataSetDataFlow
+```bash
+python validate_links.py
 ```
 
-Columns append `/<colName>` to the file path and use the `…FlatField` class type.
+This matters on the fallback route especially: a reference id that doesn't match a
+catalogued asset does **not** fail the scan, it just silently writes no edge, so
+you get a green job and no lineage.
 
 ---
 
-## Phase A — one-time setup in Metadata Command Center (UI)
+## Fallback route — Custom Lineage catalog source
 
-**Before you start:** your role needs Create/Read/Update/Delete on the
-**Custom Catalog Source Type** asset (Administrator → Roles → Asset permissions).
+Use this if the content API is unavailable on your tenant. It ingests the same
+`links.csv`, packaged as `GenericLinks.zip`, via a Custom Metadata Integration
+catalog source scanned by a Secure Agent. Steps 4–7 of Informatica's
+*Custom Metadata Integration Reference* plus KB 000192802.
 
-### A1. Create the Custom Catalog Source Type
+**Phase A is UI-only.** Re-probed against this tenant: every REST path for creating
+a custom catalog source *type* returns 404, and there is no file-upload endpoint.
+Only catalog source CRUD and run are public
+(`/data360/catalog-source-management/v1/catalogsources`, confirmed 200 here).
 
-1. In **Metadata Command Center**, click **New** in the left navigation panel.
-2. In the **New** dialog, select **Customization** in the left pane, then click
-   **Custom Catalog Source Type** in the right pane.
-3. **Name:** `Custom Lineage` (any name; it just labels the source system).
-4. Optionally add a description, then click **Save**.
+**Prerequisite:** your role needs Create/Read/Update/Delete on the **Custom Catalog
+Source Type** asset (Administrator → Roles → Asset permissions). Since the
+November 2025 release you also need permissions on the *connections* behind any
+catalog source you create, edit, schedule or run.
 
-It now appears on the **Customize** page.
+1. **New → Customization → Custom Catalog Source Type.** Name it e.g.
+   `Custom Lineage`, Save. There is no template or source-type picker here — the
+   type is just a label.
+2. **Build the zip:** `python seed_lineage.py --zip --validate`. The archive must be
+   `GenericLinks.zip` containing `links.csv`, exactly those names and casing, and
+   the zip name may not contain extra dots. The CSV must be **UTF-8 without BOM**,
+   and the three headers must be three separate comma-delimited columns.
+3. **New → Catalog Source**, expand **Custom Catalog Source Type**, select the type
+   from step 1, **Create**.
+4. **Registration** page: name it, then under **Connection Information** set
+   **Metadata Source Type = CSV Files**, **Source Type = Upload**, and attach
+   `GenericLinks.zip` under **File Details**. Select the Secure Agent
+   **Runtime Environment**.
+5. **Next** → **Configuration**: **Metadata Extraction** is on by default and is all
+   a links-only job needs. **Next** through **Associations** and **Schedule**, then
+   **Save**.
+6. Note the catalog source UUID from the browser address bar, then **Run** (or
+   Actions → Run on the Explore page). Watch it under **Job Monitoring**.
 
-> **No custom model is needed.** A custom model (Steps 1–3 of Informatica's
-> Custom Metadata Integration workflow) only matters when you are introducing
-> *new asset classes*. Here `links.csv` references assets that CDGC has already
-> catalogued by their existing reference ids, so the stock custom source type is
-> enough.
-
-### A2. Build the zip
-
-```bash
-python seed_lineage.py --zip        # links.csv -> GenericLinks.zip
-python seed_lineage.py --validate   # every reference id must resolve
-```
-
-`--validate` matters: a reference id that doesn't match a catalogued asset does
-**not** fail the scan — it just silently writes no edge, so you get a green job
-and no lineage.
-
-The names are fixed by the scanner (KB 000192802): the archive must be
-`GenericLinks.zip` and the file inside it `links.csv`. The zip name may not
-contain extra dots.
-
-### A3. Create the catalog source
-
-1. Click **New** in the left navigation panel, then select **Catalog Source**
-   in the left pane.
-2. In the right pane, expand **Custom Catalog Source Type** and select the
-   **Custom Lineage** type you created in A1. Click **Create**.
-3. On the **Registration** page, enter a name, e.g. `Product Lineage Seed`.
-4. In **Connection Information**:
-   - **Metadata Source Type:** `CSV Files`
-   - **Source Type:** `Upload`
-   - **File Details:** Browse to (or drag in) `GenericLinks.zip`
-   - **Runtime Environment:** the Secure Agent runtime — the same one the four
-     File System catalog sources already use.
-5. Click **Next** to **Configuration**. **Metadata Extraction** is enabled by
-   default; leave it. Nothing else needs enabling for pure lineage.
-6. Click **Next** through **Associations** (stakeholders — optional) and
-   **Schedule** (leave unscheduled; this is a one-off).
-7. Click **Save**.
-
-### A4. Note the catalog source id
-
-Open the saved catalog source; its id is the UUID in the browser address bar.
+Re-running afterwards is scriptable:
 
 ```bash
-export CUSTOM_LINEAGE_DS_ID=<that-uuid>
-```
-
-### A5. Run it
-
-Click **Run** on the wizard (or **Actions → Run** on the Explore page), then
-**Run** again in the **Run Catalog Source Job** dialog. Watch it under
-**Job Monitoring**.
-
----
-
-## Phase B — re-running (scripted)
-
-Once the source exists, re-running the scan needs no UI:
-
-```bash
-source ../demo/env.local.sh                 # CDGC creds (gitignored)
-export IDMC_TOOLKIT=<dir containing the idmc/ package>
-export CUSTOM_LINEAGE_DS_ID=<uuid from A4>
-
-python seed_lineage.py --sync               # POSTs operations/sync, prints the jobId
-python seed_lineage.py --verify             # did real lineage edges appear?
-```
-
-`--verify` exits 0 once a **non-structural** edge touches `dim_product.csv` or its
-columns (it filters out the file/field, DQ, glossary and marketplace edges that
-are always there).
-
-**To change the links** after Phase A, edit `links.csv`, re-run
-`--zip --validate`, then **re-upload `GenericLinks.zip` under File Details** on
-the catalog source in MCC and `--sync` again. The upload is the one step that
-cannot be scripted.
-
----
-
-## Verify end to end
-
-```bash
+export CUSTOM_LINEAGE_DS_ID=<uuid from step 6>
+python seed_lineage.py --sync
 python seed_lineage.py --verify
 ```
 
-Expect a `core.DataSetDataFlow` / `core.DirectionalDataFlow` edge now touching
-`dim_product.csv` and its `sku` / `list_price` columns. The deployed Provenance
-Stamping policy then stamps:
+> **No custom model is required.** A custom model only matters when introducing new
+> asset *classes*. `links.csv` references assets CDGC has already catalogued, so a
+> stock custom catalog source type is enough.
+
+> **Scanned lineage is additive.** Deleting a row from `links.csv` and re-scanning
+> does **not** remove the old edge — you have to purge the custom lineage catalog
+> source and re-run. (Purging that source does not touch the real underlying
+> catalog sources.) The content API route does not have this problem.
+
+---
+
+## Verify
+
+```bash
+python seed_lineage.py --verify      # exits 0 once real lineage edges exist
+./../demo/demo.sh                    # end-to-end through the gateway
+```
+
+`--verify` reports only **non-structural** edges, filtering out the file/field, DQ,
+glossary and marketplace relationships that are always present — the same denylist
+the policy uses. The deployed policy then stamps:
 
 ```
 x-dp-lineage-downstream: fact_order_line.csv
 x-dp-lineage-status: present
 ```
 
-with **no policy rebuild** — it detects lineage by a denylist of structural
-relationship types, so any real dataflow edge counts. Re-run `../demo/demo.sh` to
-see it on the wire.
+with **no policy rebuild**.
 
-> The policy caches derived provenance for `refreshIntervalSeconds` (default 24h),
-> and a redeploy does not clear it. To see the change immediately, lower that
-> value via `api-mgr:policy:edit`, redeploy, make one warm-up call, then restore.
+> The policy caches derived provenance for `refreshIntervalSeconds` (default 24h)
+> and a redeploy does not clear it. If a freshly-seeded edge doesn't show, lower
+> that value via `api-mgr:policy:edit`, redeploy, make one warm-up call, then
+> restore.
 
 ---
 
 ## Do not re-scan the Product Catalog source
 
-The catalogued path for `dim_product.csv` is `/data/csv/dim_product.csv`, but the
-file now also lives under a `product-catalog/` subfolder on the demo share. A full
-re-scan of that catalog source could re-home the asset under a new path, which
-changes its `core.externalId` — invalidating both `links.csv` **and** the
-`schemaId` the deployed policy is configured with. Seed lineage with its own
-catalog source (as above); leave the existing four alone.
+`dim_product.csv` is catalogued at `/data/csv/dim_product.csv`, but the file now
+also sits under a `product-catalog/` subfolder on the demo share. A full re-scan
+could re-home the asset under a new path, changing its `core.externalId` — which
+would invalidate both `links.csv` **and** the `schemaId` the deployed policy is
+configured with.
 
 ## Security
 
-CDGC credentials are read from the environment only — never write them to a file
-in this repo. `../demo/env.local.sh` and `../demo/config.json` are gitignored;
-only the `.example` variants are tracked. `links.csv` is gitignored too, because
-reference ids embed tenant catalog source ids.
+CDGC credentials are read from the environment only — never write them to a file in
+this repo. `../demo/env.local.sh` and `../demo/config.json` are gitignored; only the
+`.example` variants are tracked. `links.csv` is gitignored too, because reference
+ids embed tenant catalog source ids.
