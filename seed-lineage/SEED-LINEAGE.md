@@ -52,6 +52,27 @@ Headers: `Authorization: Bearer <jwt>`, `X-INFA-ORG-ID`, `X-INFA-PRODUCT-ID: CDG
 plus the login session cookie (`USER_SESSION` / `IDS_TOKEN`) — these writes are
 PEP-gated and the JWT alone is not enough.
 
+### Deleting *any* catalog source can silently wipe your edges
+
+`DELETE /datasources/{id}` submits an async **"Bulk Purge Group"** job, and that
+purge removed all three edges authored here — even though they were created
+through the content API and their `core.sourceOrigin` was the *Product Catalog*
+source, not the one being deleted. Observed live: delete the unrelated
+`Custom Lineage` source, and `seed_lineage.py --verify` goes from three edges to
+none.
+
+Two things make this easy to miss:
+
+- **The gateway keeps serving `present`** from its 24h cache long after the edges
+  are gone, so the demo looks fine while the catalog underneath is empty.
+- **The purge is async and slow.** The delete returns `200` immediately, the
+  source stays in the listing for 10+ minutes, and the edges disappear on the
+  purge's own schedule.
+
+Re-run `apply_lineage.py` after deleting any catalog source, and confirm with
+`--verify` rather than trusting the response headers. Rows coming back `200`
+instead of `409 SAME` is itself the tell that the edges had been purged.
+
 ### Three things that will cost you an afternoon
 
 1. **The body is a bare JSON list**, not a single object. Sending the object form
