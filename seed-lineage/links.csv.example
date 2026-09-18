@@ -1,0 +1,4 @@
+Source,Target,Association
+<productCatalogSourceId>://FileServer/data/csv/dim_product.csv~com.infa.odin.models.file.flat.FlatFile,<orderTransactionSourceId>://FileServer/data/csv/order-transactions/fact_order_line.csv~com.infa.odin.models.file.flat.FlatFile,core.DataSetDataFlow
+<productCatalogSourceId>://FileServer/data/csv/dim_product.csv/sku~com.infa.odin.models.file.flat.FlatField,<orderTransactionSourceId>://FileServer/data/csv/order-transactions/fact_order_line.csv/sku~com.infa.odin.models.file.flat.FlatField,core.DirectionalDataFlow
+<productCatalogSourceId>://FileServer/data/csv/dim_product.csv/list_price~com.infa.odin.models.file.flat.FlatField,<orderTransactionSourceId>://FileServer/data/csv/order-transactions/fact_order_line.csv/unit_price~com.infa.odin.models.file.flat.FlatField,core.DirectionalDataFlow

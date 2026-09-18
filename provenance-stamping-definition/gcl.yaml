@@ -1,0 +1,87 @@
+---
+apiVersion: gateway.mulesoft.com/v1alpha1
+kind: Extension
+metadata:
+  labels:
+    title: Data Product Provenance Stamping
+    category: Transformation
+    description: >-
+      Derives a data product's provenance and, when present, lineage from
+      Informatica CDGC and stamps them onto responses as x-dp-provenance-* and
+      x-dp-lineage-* headers. Inbound, headers-only, fail-open enrichment.
+    metadata/capabilities/injectionPoint: inbound
+    metadata/capabilities/assetTypes: mcp,rest,http
+    metadata/interfaceScope: api,resource
+spec:
+  extends:
+    - name: extension-definition
+      namespace: default
+  properties:
+    cdgcLoginUrl:
+      type: string
+      format: service
+      description: IDMC login base URL, e.g. https://dm-us.informaticacloud.com.
+    cdgcSearchUrl:
+      type: string
+      format: service
+      description: CDGC search host (ccgf-searchv2), e.g. https://cdgc-api.dm-us.informaticacloud.com.
+    cdgcOrgUsername:
+      type: string
+      description: IDMC read-only service-account username.
+      "@context": { "@characteristics": [security:sensitive] }
+    cdgcOrgPassword:
+      type: string
+      description: IDMC service-account password.
+      "@context": { "@characteristics": [security:sensitive] }
+    schemaId:
+      type: string
+      description: >-
+        CDGC asset id of the scanned schema — a flat file, table, etc. The policy
+        derives its provenance (catalog origin, source path, scan freshness,
+        lifecycle, certification, collection) and lineage from CDGC — no per-field config.
+    schemaIdHeader:
+      type: string
+      default: x-dp-schema-id
+      description: Optional request header overriding schemaId per request.
+    schemaIdClaim:
+      type: string
+      description: >-
+        Optional JWT claim name to read schemaId from. When set and present in the
+        caller's (upstream-validated) Bearer token, the claim wins over schemaIdHeader
+        — so the token binds the caller to a data product and a spoofed header can't
+        redirect it. Unset (default) = header/config only. Requires a JWT Validation
+        policy upstream to verify the token.
+    includeLineage:
+      type: boolean
+      default: true
+      description: >-
+        Also resolve the asset's data lineage from CDGC and stamp x-dp-lineage-*
+        headers (upstream/downstream neighbours). Turn off to stamp provenance only
+        (one fewer CDGC call).
+    headerOnMiss:
+      type: boolean
+      default: true
+      description: Stamp x-dp-provenance-status=unavailable when CDGC provenance can't be resolved (fail-open).
+    refreshIntervalSeconds:
+      type: integer
+      default: 86400
+      minimum: 30
+      description: Cache TTL for the derived provenance before a lazy CDGC refresh.
+    failOpenOnCdgcError:
+      type: boolean
+      default: true
+      description: Serve last-known-good on transient CDGC error; never block (enrichment).
+    distributed:
+      type: boolean
+      default: false
+      description: Share cache + refresh lock across replicas (needs shared storage).
+    timeout:
+      type: integer
+      default: 5000
+      description: Per-CDGC-call timeout (ms), clamped to a chained budget (~15s).
+  required:
+    - cdgcLoginUrl
+    - cdgcSearchUrl
+    - cdgcOrgUsername
+    - cdgcOrgPassword
+    - schemaId

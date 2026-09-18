@@ -1,0 +1,10 @@
+{
+  "protocolVersion": "2025-03-26",
+  "transport": { "kind": "streamableHttp", "path": "/mcp" },
+  "capabilities": { "tools": { "listChanged": true } },
+  "tools": [
+    { "name": "get_products",
+      "description": "Return product-catalog records (fields mirror the CDGC-governed dim_product.csv). Responses are stamped with x-dp-provenance-* / x-dp-lineage-* headers by the Provenance Stamping policy.",
+      "inputSchema": { "type": "object", "properties": { "variant": { "type": "string" } } } }
+  ]
+}
